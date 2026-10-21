@@ -1,0 +1,173 @@
+// RideNow API contract (v1).
+//
+// Versioning rule of thumb: the package carries the major version ("v1").
+// Within v1 you may only make backward-compatible changes:
+//   ✅ add new fields (new field numbers), add new RPCs, add enum values
+//   ❌ change a field's number or type, reuse a deleted field's number
+// Old Android app versions live in the wild for years — this matters.
+syntax = "proto3";
+
+package ridenow.v1;
+
+option java_multiple_files = true;          // one Java class per message
+option java_package = "com.ridenow.proto.v1";
+
+// =============================================================================
+// Service
+// =============================================================================
+service RideService {
+  // ---- 1. UNARY: one request -> one response (like a REST call) -------------
+  rpc GetFareEstimate(FareEstimateRequest) returns (FareEstimateResponse);
+  rpc RequestRide(RideRequest) returns (RideResponse);
+
+  // ---- 2. SERVER STREAMING: one request -> many responses -------------------
+  // Rider subscribes once; server pushes driver location until trip completes.
+  rpc TrackDriver(TrackDriverRequest) returns (stream DriverLocation);
+
+  // ---- 3. CLIENT STREAMING: many requests -> one response -------------------
+  // Driver app uploads a batch of GPS points (e.g. buffered while offline);
+  // server replies once with a summary after the client half-closes.
+  rpc UploadLocations(stream LocationPoint) returns (UploadSummary);
+
+  // ---- 4. BIDIRECTIONAL STREAMING: many <-> many, independent directions ----
+  // In-trip chat. Note request and response types can differ.
+  rpc TripChat(stream ChatClientEvent) returns (stream ChatMessage);
+}
+
+// =============================================================================
+// Shared types
+// =============================================================================
+message LatLng {
+  double lat = 1;
+  double lng = 2;
+}
+
+// Enums: the 0 value MUST be the "unspecified" default in proto3, because an
+// unset field decodes as 0. Prefix values with the enum name to avoid clashes.
+enum RideType {
+  RIDE_TYPE_UNSPECIFIED = 0;
+  RIDE_TYPE_ECONOMY = 1;
+  RIDE_TYPE_PREMIUM = 2;
+  RIDE_TYPE_XL = 3;
+}
+
+enum RideStatus {
+  RIDE_STATUS_UNSPECIFIED = 0;
+  RIDE_STATUS_DRIVER_ASSIGNED = 1;
+  RIDE_STATUS_DRIVER_ARRIVING = 2;
+  RIDE_STATUS_DRIVER_ARRIVED = 3;
+  RIDE_STATUS_IN_PROGRESS = 4;
+  RIDE_STATUS_COMPLETED = 5;
+  RIDE_STATUS_CANCELLED = 6;
+}
+
+// =============================================================================
+// Unary
+// =============================================================================
+message FareEstimateRequest {
+  LatLng pickup = 1;
+  LatLng dropoff = 2;
+  RideType ride_type = 3;
+}
+
+message FareEstimateResponse {
+  string estimate_id = 1;        // pass back in RideRequest (locks the price)
+  int64 fare_minor_units = 2;    // money as integer minor units (paise/cents) — never float
+  string currency = 3;
+  double distance_km = 4;
+  int32 pickup_eta_seconds = 5;
+  double surge_multiplier = 6;
+  int64 expires_at_epoch_ms = 7;
+}
+
+message RideRequest {
+  string estimate_id = 1;
+  string idempotency_key = 2;    // client-generated; safe to retry RequestRide
+}
+
+message Driver {
+  string driver_id = 1;
+  string name = 2;
+  string vehicle = 3;
+  string plate = 4;
+  float rating = 5;
+}
+
+message RideResponse {
+  string ride_id = 1;
+  RideStatus status = 2;
+  Driver driver = 3;
+  LatLng pickup = 4;
+  LatLng dropoff = 5;
+
+  // Example of safely removing a field: reserve its number AND name so nobody
+  // can reuse them with a different meaning (old clients would mis-decode).
+  reserved 6;
+  reserved "driver_phone";
+}
+
+// =============================================================================
+// Server streaming
+// =============================================================================
+message TrackDriverRequest {
+  string ride_id = 1;
+}
+
+message DriverLocation {
+  string ride_id = 1;
+  LatLng position = 2;
+  float bearing_degrees = 3;
+  int32 eta_seconds = 4;         // to pickup while arriving, to dropoff during trip
+  RideStatus status = 5;
+  int64 timestamp_epoch_ms = 6;
+}
+
+// =============================================================================
+// Client streaming
+// =============================================================================
+message LocationPoint {
+  string driver_id = 1;
+  LatLng position = 2;
+  float speed_mps = 3;
+  int64 timestamp_epoch_ms = 4;
+}
+
+message UploadSummary {
+  int32 points_received = 1;
+  double distance_km = 2;
+  int64 duration_ms = 3;
+  float max_speed_mps = 4;
+}
+
+// =============================================================================
+// Bidirectional streaming
+// =============================================================================
+enum ChatRole {
+  CHAT_ROLE_UNSPECIFIED = 0;
+  CHAT_ROLE_RIDER = 1;
+  CHAT_ROLE_DRIVER = 2;
+  CHAT_ROLE_SYSTEM = 3;
+}
+
+// `oneof` = exactly one of these fields is set (a tagged union).
+// First event on the stream must be `join`; subsequent events are `text`.
+message ChatClientEvent {
+  oneof event {
+    JoinChat join = 1;
+    string text = 2;
+  }
+}
+
+message JoinChat {
+  string ride_id = 1;
+  ChatRole role = 2;
+}
+
+message ChatMessage {
+  string message_id = 1;         // assigned by server
+  string ride_id = 2;
+  string sender_id = 3;
+  ChatRole sender_role = 4;
+  string text = 5;
+  int64 timestamp_epoch_ms = 6;  // server clock = single source of ordering
+}
